@@ -5,10 +5,10 @@ export async function callGroq(messages, jsonMode = false) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.GROQ_API_KEY}`
+        Authorization: `Bearer ${process.env.VITE_GROQ_API_KEY}`
       },
       body: JSON.stringify({
-        model: process.env.GROQ_MODEL || "llama3-70b-8192",
+        model: process.env.GROQ_MODEL || "llama-3.1-8b-instant",
         messages,
         temperature: 0.3,
         response_format: jsonMode

@@ -1,6 +1,6 @@
 # Aurex — AI-Powered Learning Management System
 
-Live Deployment: https://aurex-orcin.vercel.app/
+Live Deployment: https://aurex-clean-rxbc.vercel.app/
 
 ---
 

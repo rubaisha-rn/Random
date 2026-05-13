@@ -22,7 +22,7 @@ export default function LearningPath({ profile, studentProfile, onProgressUpdate
         .from('learning_paths')
         .select('*')
         .eq('user_id', profile.id)
-        .single()
+        .maybeSingle()
 
         if (existing) {
         setPathData(existing)
@@ -43,49 +43,76 @@ export default function LearningPath({ profile, studentProfile, onProgressUpdate
     }
 
   async function generatePath() {
-    setGenerating(true)
-    
-    // Fetch all modules
+  setGenerating(true)
+
+  try {
     const { data: allModules } = await supabase
       .from('modules')
       .select('*, courses(title, difficulty, target_background)')
-    
-    // Fetch existing progress
+
     const { data: progressData } = await supabase
       .from('progress')
       .select('*')
       .eq('user_id', profile.id)
 
-    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer YOUR_GROQ_API_KEY`
-    },
-    body: JSON.stringify({
-        model: "llama3-70b-8192",
-        messages: [
-        {
-            role: "system",
-            content: "Return ONLY JSON learning path."
+    const response = await fetch(
+      "https://api.groq.com/openai/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${import.meta.env.VITE_GROQ_API_KEY}`
         },
-        {
-            role: "user",
-            content: JSON.stringify({
-            profile: studentProfile,
-            modules: allModules,
-            progress: progressData
-            })
-        }
-        ],
-        temperature: 0.3
-    })
-    })
+        body: JSON.stringify({
+          model: "llama-3.1-8b-instant",
+          messages: [
+            {
+              role: "system",
+              content: "Return ONLY JSON learning path."
+            },
+            {
+              role: "user",
+              content: JSON.stringify({
+                profile: studentProfile,
+                modules: allModules,
+                progress: progressData
+              })
+            }
+          ],
+          temperature: 0.3
+        })
+      }
+    )
 
-    const aiResult = await response.json()
-    
-    // Save to Supabase
-    const { data: saved } = await supabase
+    const groqData = await response.json()
+
+    let aiResult
+
+    try {
+      aiResult = JSON.parse(
+        groqData.choices[0].message.content
+          .replace(/```json|```/g, '')
+          .trim()
+      )
+    } catch {
+      aiResult = {}
+    }
+
+    // fallback if AI fails
+    if (!aiResult.recommended_path?.length) {
+      aiResult = {
+        recommended_path:
+          allModules.slice(0, 5).map(m => m.id),
+        reasoning:
+          "Starter learning path generated.",
+        estimated_weeks: 8,
+        focus_areas: ["Python", "ML Basics"],
+        priority_modules: [],
+        skip_modules: []
+      }
+    }
+
+    await supabase
       .from('learning_paths')
       .upsert({
         user_id: profile.id,
@@ -94,13 +121,19 @@ export default function LearningPath({ profile, studentProfile, onProgressUpdate
         estimated_weeks: aiResult.estimated_weeks,
         focus_areas: aiResult.focus_areas
       })
-      .select()
-      .single()
 
     setPathData(aiResult)
-    await loadModulesForPath(aiResult.recommended_path)
+
+    await loadModulesForPath(
+      aiResult.recommended_path
+    )
+
+  } catch (err) {
+    console.error("PATH ERROR:", err)
+  } finally {
     setGenerating(false)
   }
+}
 
   async function loadModulesForPath(pathIds) {
     if (!pathIds?.length) return
