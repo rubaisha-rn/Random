@@ -9,8 +9,17 @@ export default function InstructorDashboard({ profile }) {
   const [alertsLoading, setAlertsLoading] = useState(false)
 
   useEffect(() => {
-    supabase.from('courses').select('*').eq('instructor_id', profile.id).then(({ data }) => setCourses(data || []))
-  }, [])
+    async function loadCourses() {
+      const { data, error } = await supabase
+        .from('courses')
+        .select('*')
+        .eq('instructor_id', profile.id)
+
+      if (!error) setCourses(data || [])
+    }
+
+    loadCourses()
+  }, [profile.id])
 
   async function selectCourse(course) {
     setSelectedCourse(course)
@@ -19,46 +28,108 @@ export default function InstructorDashboard({ profile }) {
 
   async function fetchStudentsAndAlerts(courseId) {
     setAlertsLoading(true)
-    
-    // Get enrolled students with their progress stats
-    const { data: enrollments } = await supabase
-      .from('enrollments')
-      .select('user_id, profiles(id, name)')
-      .eq('course_id', courseId)
+    setAlerts([])
+    setStudents([])
 
-    const studentIds = enrollments?.map(e => e.user_id) || []
-    
-    if (!studentIds.length) { setAlertsLoading(false); return }
+    try {
+      // 1. Get enrollments (NO JOIN — reliable)
+      const { data: enrollments, error: enrollErr } = await supabase
+        .from('enrollments')
+        .select('user_id')
+        .eq('course_id', courseId)
 
-    const { data: progressData } = await supabase
-      .from('progress')
-      .select('*')
-      .in('user_id', studentIds)
+      if (enrollErr) throw enrollErr
 
-    // Build stats per student
-    const studentStats = (enrollments || []).map(e => {
-      const sp = progressData?.filter(p => p.user_id === e.user_id) || []
-      const scored = sp.filter(p => p.score != null)
-      return {
-        student_id: e.user_id,
-        student_name: e.profiles?.name,
-        avg_score: scored.length ? scored.reduce((a,b) => a+b.score, 0) / scored.length : null,
-        completed_count: sp.filter(p => p.completed).length,
-        total_attempts: sp.reduce((a,b) => a + b.attempts, 0),
-        last_activity: sp.map(p => p.completed_at).filter(Boolean).sort().reverse()[0] || null
+      const studentIds = (enrollments || []).map(e => e.user_id)
+
+      if (!studentIds.length) {
+        setAlerts([])
+        setStudents([])
+        return
       }
-    })
-    setStudents(studentStats)
 
-    const response = await fetch('/api/ai-alerts', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ students: studentStats })
-    })
+      // 2. Get profiles separately (FIX FOR "Unknown")
+      const { data: profiles, error: profileErr } = await supabase
+        .from('profiles')
+        .select('id, name')
+        .in('id', studentIds)
 
-    const alertsData = await response.json()
-    setAlerts(Array.isArray(alertsData) ? alertsData : [])
-    setAlertsLoading(false)
+      if (profileErr) throw profileErr
+
+      const profileMap = {}
+      profiles?.forEach(p => {
+        profileMap[p.id] = p.name
+      })
+
+      // 3. Get progress
+      const { data: progressData, error: progErr } = await supabase
+        .from('progress')
+        .select('*')
+        .in('user_id', studentIds)
+
+      if (progErr) throw progErr
+
+      // 4. Build student stats
+      const studentStats = (enrollments || []).map(e => {
+        const sp = (progressData || []).filter(
+          p => p.user_id === e.user_id
+        )
+
+        const scored = sp.filter(
+          p => p.score !== null && p.score !== undefined
+        )
+
+        const avgScore = scored.length
+          ? scored.reduce((sum, p) => sum + Number(p.score || 0), 0) /
+            scored.length
+          : null
+
+        const completedCount = sp.filter(p => p.completed).length
+
+        const totalAttempts = sp.reduce(
+          (sum, p) => sum + (p.attempts || 0),
+          0
+        )
+
+        const lastActivity =
+          sp
+            .map(p => p.completed_at)
+            .filter(Boolean)
+            .sort()
+            .reverse()[0] || null
+
+        return {
+          student_id: e.user_id,
+          student_name: profileMap[e.user_id] || 'Unknown',
+          avg_score: avgScore,
+          completed_count: completedCount,
+          total_attempts: totalAttempts,
+          last_activity: lastActivity
+        }
+      })
+
+      setStudents(studentStats)
+
+      // 5. AI ALERTS CALL
+      const response = await fetch('/api/ai-alerts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ students: studentStats })
+      })
+
+      if (!response.ok) {
+        throw new Error(await response.text())
+      }
+
+      const alertsData = await response.json()
+
+      setAlerts(Array.isArray(alertsData) ? alertsData : [])
+    } catch (err) {
+      console.error('Instructor dashboard error:', err)
+      setAlerts([])
+    } finally {
+      setAlertsLoading(false)
+    }
   }
 
   return (
@@ -66,79 +137,126 @@ export default function InstructorDashboard({ profile }) {
       <header className="dashboard-header">
         <span className="logo">atomcamp</span>
         <span>Instructor: {profile.name}</span>
-        <button onClick={() => supabase.auth.signOut()}>Sign Out</button>
+        <button onClick={() => supabase.auth.signOut()}>
+          Sign Out
+        </button>
       </header>
 
       <div className="instructor-layout">
         <aside className="course-list">
           <h3>Your Courses</h3>
-          {courses.map(c => (
+
+          {courses.map(course => (
             <div
-              key={c.id}
-              className={`course-item ${selectedCourse?.id === c.id ? 'active' : ''}`}
-              onClick={() => selectCourse(c)}
+              key={course.id}
+              className={`course-item ${
+                selectedCourse?.id === course.id ? 'active' : ''
+              }`}
+              onClick={() => selectCourse(course)}
             >
-              {c.title}
+              {course.title}
             </div>
           ))}
         </aside>
 
         <main className="instructor-main">
           {!selectedCourse ? (
-            <div className="empty-state">Select a course to see student analytics</div>
+            <div className="empty-state">
+              Select a course to see student analytics
+            </div>
           ) : (
             <>
-              <h2>{selectedCourse.title} — Student Overview</h2>
-              
+              <h2>
+                {selectedCourse.title} — Student Overview
+              </h2>
+
               {alertsLoading ? (
                 <div className="ai-loading">
                   <div className="spinner" />
-                  <p>AI is analyzing {students.length} students for early warning signals...</p>
+                  <p>
+                    AI is analyzing {students.length} students...
+                  </p>
                 </div>
               ) : (
                 <>
                   {alerts.length > 0 && (
                     <div className="alerts-panel">
-                      <h3>⚠️ AI Early Warning Alerts ({alerts.length})</h3>
+                      <h3>
+                        ⚠️ AI Alerts ({alerts.length})
+                      </h3>
+
                       {alerts.map((a, i) => (
-                        <div key={i} className={`alert-card ${a.risk_level}`}>
+                        <div
+                          key={i}
+                          className={`alert-card ${a.risk_level}`}
+                        >
                           <div className="alert-header">
                             <strong>{a.student_name}</strong>
-                            <span className={`risk-badge ${a.risk_level}`}>{a.risk_level} risk</span>
+                            <span
+                              className={`risk-badge ${a.risk_level}`}
+                            >
+                              {a.risk_level} risk
+                            </span>
                           </div>
-                          <p className="alert-reason">{a.reason}</p>
-                          <p className="alert-rec">💡 {a.recommendation}</p>
+
+                          <p>{a.reason}</p>
+                          <p>💡 {a.recommendation}</p>
                         </div>
                       ))}
                     </div>
                   )}
 
                   <div className="students-table">
-                    <h3>All Students ({students.length})</h3>
+                    <h3>
+                      All Students ({students.length})
+                    </h3>
+
                     <table>
                       <thead>
                         <tr>
                           <th>Name</th>
                           <th>Avg Score</th>
-                          <th>Modules Completed</th>
-                          <th>Total Attempts</th>
+                          <th>Completed</th>
+                          <th>Attempts</th>
                           <th>Status</th>
                         </tr>
                       </thead>
+
                       <tbody>
                         {students.map(s => {
-                          const alert = alerts.find(a => a.student_id === s.student_id)
+                          const alert = alerts.find(
+                            a => a.student_id === s.student_id
+                          )
+
                           return (
-                            <tr key={s.student_id} className={alert ? `risk-${alert.risk_level}` : ''}>
+                            <tr
+                              key={s.student_id}
+                              className={
+                                alert
+                                  ? `risk-${alert.risk_level}`
+                                  : ''
+                              }
+                            >
                               <td>{s.student_name}</td>
-                              <td>{s.avg_score != null ? Math.round(s.avg_score) + '%' : 'N/A'}</td>
+                              <td>
+                                {s.avg_score != null
+                                  ? Math.round(s.avg_score) + '%'
+                                  : 'N/A'}
+                              </td>
                               <td>{s.completed_count}</td>
                               <td>{s.total_attempts}</td>
                               <td>
-                                {alert
-                                  ? <span className={`status-badge ${alert.risk_level}`}>{alert.risk_level} risk</span>
-                                  : <span className="status-badge ok">On Track</span>
-                                }
+                                {alert ? (
+                                  <span
+                                    className={`status-badge ${alert.risk_level}`}
+                                  >
+                                    {alert.risk_level} risk
+                                  </span>
+                                ) : (
+                                  <span className="status-badge ok">
+                                    On Track
+                                  </span>
+                                )}
                               </td>
                             </tr>
                           )
